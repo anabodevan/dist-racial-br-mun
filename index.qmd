@@ -1,0 +1,473 @@
+---
+title: "Distribuição Racial do Brasil"
+date: '2025-06-29'
+image: mapa1.png
+categories: ['demography', 'data science', 'tidyverse', 'ggplot2']
+description: 'visualizando a distribuição racial brasileira com ggplot2'
+execute: 
+  message: false
+  warning: false
+format:
+  html:
+    code-fold: true
+    code-summary: 'Código'
+---
+
+### Introdução
+
+O objetivo dessa ánalise é investigar a distribuição racial do Brasil em nível municipal utilizando dados do [Sistema IBGE de Recuperação Automática - SIDRA](https://sidra.ibge.gov.br/pesquisa/censo-demografico/demografico-2022/universo-populacao-por-cor-ou-raca), facilmente acessíveis no R utilizando o pacote `sidrar`.
+
+### Dados
+
+#### Pacotes e Importação
+
+```{r}
+library(pacman)
+pacman :: p_load (sidrar, geobr, tidyverse, janitor, sf, 
+                  knitr, kableExtra, ggtext, showtext, DT, patchwork)
+
+df <- 
+  get_sidra(x = "9605", # número da tabela no Sidra 
+            period = "2022", # ano de interesse 
+            geo = "City") %>% # divisão administrativa
+  clean_names() %>% 
+  rename('code_muni' = 'municipio_codigo') # já renomeando para o join
+
+shape <- geobr::read_municipality() # shapefile dos municípios
+
+df_shape <- shape %>% 
+  left_join(df %>% mutate(code_muni = as.numeric(code_muni)), 
+             by = "code_muni") # une dfs pela coluna code_muni
+```
+
+#### Limpeza e Ánalise
+
+```{r}
+
+df_shape %>% 
+  select(cor_ou_raca)
+```
+
+O IBGE apresenta cinco classificações de cor/raça: **Branca**, **Preta**, **Amarela**, **Parda**, e **Índigena**. Para facilitar o entedimento dos dados, irei utilizar o pacote `DT` (que permite usar a biblioteca DataTables do Java no R) para criar uma tabela interativa com o percentual da população do munícipio pertecente a cada raça.
+
+```{r}
+# Calcular percentuais por município
+tabela_percentuais <- df_shape %>%
+  filter(cor_ou_raca != "Total") %>%  
+  # Remove geometria
+  st_drop_geometry() %>%
+  # Seleciona apenas as colunas necessárias
+  select(municipio, cor_ou_raca, valor) %>%
+  # Remove valores NA
+  filter(!is.na(valor), !is.na(cor_ou_raca)) %>%
+  # Agrupa por município e calcula total e percentual
+  group_by(municipio) %>%
+  mutate(
+    total_pop = sum(valor, na.rm = TRUE),
+    percentual = round((valor / total_pop) * 100, 2)
+  ) %>%
+  ungroup() %>%
+  # Pivota para ter uma coluna por raça
+  select(municipio, cor_ou_raca, percentual) %>%
+  pivot_wider(
+    names_from = cor_ou_raca,
+    values_from = percentual,
+    values_fill = 0
+  ) %>%
+  # Ordena
+  arrange(municipio)
+
+tabela_percentuais %>%
+  datatable(
+     filter = 'top',
+     options = list(
+      pageLength = 20,
+      scrollX = TRUE,
+      dom = 'Bfrtip'
+  ))
+```
+
+### Visualizações
+
+Visualizações me mapas cloropéticos facilitam o entendimento dos dados e nos ajudam a ver a realidade como um todo. O pacote `geobr`, utilizado anteriormente para criar o data frame `shape`, permite acesso fácil às geometrias do Brasil do maior ao menor nível administrativo. No caso dessa ánalise, é utilizado o shapefile de munícipios, vide:
+
+```{r}
+df_shape %>% 
+  ggplot() +
+  geom_sf()
+```
+
+Ademais, é possível produzir mapas cloropéticos que mostram a distribuição racial da população brasileira.
+
+```{r}
+font_add_google("Roboto", "roboto")
+showtext_auto()
+showtext_opts(dpi = 300)
+
+brancos <- df_shape %>%
+  # Filtrar apenas população branca e remover geometria primeiro
+  st_drop_geometry() %>%
+  filter(cor_ou_raca == "Branca") %>%
+  # Calcular dados por município
+  group_by(code_muni) %>%
+  summarise(
+    municipio = first(municipio),
+    pop_branca = sum(valor, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Juntar com dados totais para calcular percentual
+  left_join(
+    df_shape %>%
+      st_drop_geometry() %>%
+      filter(cor_ou_raca != "Total") %>%
+      group_by(code_muni) %>%
+      summarise(pop_total = sum(valor, na.rm = TRUE), .groups = "drop"),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    perc_branca = round((pop_branca / pop_total) * 100, 1)
+  )
+
+# Preparar geometrias separadamente
+geometrias <- shape %>%
+  # Corrigir geometrias inválidas
+  st_make_valid() %>%
+  select(code_muni, geom) # lidando com geometrias autointersectantes
+
+# Juntar dados com geometrias
+brancos <- geometrias %>%
+  left_join(brancos, by = "code_muni")
+
+p_brancos <- brancos %>% 
+  ggplot() +
+  
+  # Camada dos municípios com gradiente de cor
+  geom_sf(
+    aes(fill = perc_branca),
+    color = "transparent",
+    size = 0.05
+  ) +
+  
+  # Escala de
+  scale_fill_gradient(
+    name = "Pop. Branca por Munícipio",
+    high = "#2C3E50",
+    low = "#4CA1AF",
+    na.value = "grey90",
+    labels = function(x) paste0(x, "%"),
+     guide = guide_colourbar(
+      title.position = "bottom",
+      title.hjust = 0.5,
+      barwidth = unit(5, "cm"),
+      barheight = unit(0.5, "cm")
+    )
+  ) +
+  
+  # Tema 
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(b = 10), 
+    plot.caption = element_text(
+      size = 10, 
+      color = "grey20",
+      hjust = 0.5,
+      family = "roboto")) +
+  
+  # Labs 
+    labs(
+    caption = "Fonte: IBGE/SIDRA | anabodevan.github.io")
+
+p_brancos
+```
+
+Com a base dos dados e do gráfico pronto, basta substituir algumas variáveis para replicar os gráficos para outras raças
+
+```{r}
+pretos <- df_shape %>%
+  # Filtrar apenas população preta e remover geometria primeiro
+  st_drop_geometry() %>%
+  filter(cor_ou_raca == "Preta") %>%
+  # Calcular dados por município
+  group_by(code_muni) %>%
+  summarise(
+    municipio = first(municipio),
+    pop_preta = sum(valor, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Juntar com dados totais para calcular percentual
+  left_join(
+    df_shape %>%
+      st_drop_geometry() %>%
+      filter(cor_ou_raca != "Total") %>%
+      group_by(code_muni) %>%
+      summarise(pop_total = sum(valor, na.rm = TRUE), .groups = "drop"),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    perc_preta = round((pop_preta / pop_total) * 100, 1)
+  )
+
+# Juntar dados com geometrias
+pretos <- geometrias %>%
+  left_join(pretos, by = "code_muni")
+
+p_pretos <- pretos %>% 
+  ggplot() +
+  
+  # Camada dos municípios com gradiente de cor
+  geom_sf(
+    aes(fill = perc_preta),
+    color = "transparent",
+    size = 0.05
+  ) +
+  
+  # Escala de
+  scale_fill_gradient(
+    name = "Pop. Preta por Munícipio",
+    low  = "#904e95",
+    high = "#e96443",
+    na.value = "grey90",
+    labels = function(x) paste0(x, "%"),
+    breaks = c(10, 30, 50),
+    guide = guide_colourbar(
+      title.position = "bottom",
+      title.hjust = 0.5,
+      barwidth = unit(5, "cm"),
+      barheight = unit(0.5, "cm")
+    )
+  ) +
+  
+  # Tema 
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(b = 20), 
+    plot.caption = element_text(
+      size = 10, 
+      color = "grey20",
+      hjust = 0.5,
+      family = "roboto")) +
+  
+  # Labs 
+    labs(
+    caption = "Fonte: IBGE/SIDRA | anabodevan.github.io")
+
+p_pretos
+```
+
+```{r}
+pardos <- df_shape %>%
+  # Filtrar apenas população preta e remover geometria primeiro
+  st_drop_geometry() %>%
+  filter(cor_ou_raca == "Parda") %>%
+  # Calcular dados por município
+  group_by(code_muni) %>%
+  summarise(
+    municipio = first(municipio),
+    pop_parda = sum(valor, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Juntar com dados totais para calcular percentual
+  left_join(
+    df_shape %>%
+      st_drop_geometry() %>%
+      filter(cor_ou_raca != "Total") %>%
+      group_by(code_muni) %>%
+      summarise(pop_total = sum(valor, na.rm = TRUE), .groups = "drop"),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    perc_parda = round((pop_parda / pop_total) * 100, 1)
+  )
+
+# Juntar dados com geometrias
+pardos <- geometrias %>%
+  left_join(pardos, by = "code_muni")
+
+p_pardos <- pardos %>% 
+  ggplot() +
+  
+  # Camada dos municípios com gradiente de cor
+  geom_sf(
+    aes(fill = perc_parda),
+    color = "transparent",
+    size = 0.05
+  ) +
+  
+  # Escala de
+  scale_fill_gradient(
+    name = "Pop. Parda por Munícipio",
+    low  = "#FFB75E",
+    high = "#fd746c",
+    na.value = "grey90",
+    labels = function(x) paste0(x, "%"),
+     guide = guide_colourbar(
+      title.position = "bottom",
+      title.hjust = 0.5,
+      barwidth = unit(5, "cm"),
+      barheight = unit(0.5, "cm")
+    )
+  ) +
+  
+  # Tema 
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(b = 10), 
+    plot.caption = element_text(
+      size = 10, 
+      color = "grey20",
+      hjust = 0.5,
+      family = "roboto")) +
+  
+  # Labs 
+    labs(
+    caption = "Fonte: IBGE/SIDRA | anabodevan.github.io")
+
+p_pardos
+```
+
+```{r}
+indigenas <- df_shape %>%
+  # Filtrar apenas população preta e remover geometria primeiro
+  st_drop_geometry() %>%
+  filter(cor_ou_raca == "Indígena") %>%
+  # Calcular dados por município
+  group_by(code_muni) %>%
+  summarise(
+    municipio = first(municipio),
+    pop_indigena = sum(valor, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Juntar com dados totais para calcular percentual
+  left_join(
+    df_shape %>%
+      st_drop_geometry() %>%
+      filter(cor_ou_raca != "Total") %>%
+      group_by(code_muni) %>%
+      summarise(pop_total = sum(valor, na.rm = TRUE), .groups = "drop"),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    perc_indigena = round((pop_indigena / pop_total) * 100, 1)
+  )
+
+# Juntar dados com geometrias
+indigenas <- geometrias %>%
+  left_join(indigenas, by = "code_muni")
+
+p_indigenas <- indigenas %>% 
+  ggplot() +
+  
+  # Camada dos municípios com gradiente de cor
+  geom_sf(
+    aes(fill = perc_indigena),
+    color = "transparent",
+    size = 0.05
+  ) +
+  
+  # Escala de
+  scale_fill_gradient(
+    name = "Pop. Indígena por Munícipio",
+    high  = "#135058",
+    low = "#F1F2B5",
+    na.value = "grey90",
+    labels = function(x) paste0(x, "%"),
+     guide = guide_colourbar(
+      title.position = "bottom",
+      title.hjust = 0.5,
+      barwidth = unit(5, "cm"),
+      barheight = unit(0.5, "cm")
+    )
+  ) +
+  
+  # Tema 
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(b = 10), 
+    plot.caption = element_text(
+      size = 10, 
+      color = "grey20",
+      hjust = 0.5,
+      family = "roboto")) +
+  
+  # Labs 
+    labs(
+    caption = "Fonte: IBGE/SIDRA | anabodevan.github.io")
+
+p_indigenas
+```
+
+```{r}
+amarelos <- df_shape %>%
+  # Filtrar apenas população preta e remover geometria primeiro
+  st_drop_geometry() %>%
+  filter(cor_ou_raca == "Amarela") %>%
+  # Calcular dados por município
+  group_by(code_muni) %>%
+  summarise(
+    municipio = first(municipio),
+    pop_amarela = sum(valor, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Juntar com dados totais para calcular percentual
+  left_join(
+    df_shape %>%
+      st_drop_geometry() %>%
+      filter(cor_ou_raca != "Total") %>%
+      group_by(code_muni) %>%
+      summarise(pop_total = sum(valor, na.rm = TRUE), .groups = "drop"),
+    by = "code_muni"
+  ) %>%
+  mutate(
+    perc_amarela = round((pop_amarela / pop_total) * 100, 1)
+  )
+
+# Juntar dados com geometrias
+amarelos <- geometrias %>%
+  left_join(amarelos, by = "code_muni")
+
+p_amarelos <- amarelos %>% 
+  ggplot() +
+  
+  # Camada dos municípios com gradiente de cor
+  geom_sf(
+    aes(fill = perc_amarela),
+    color = "transparent",
+    size = 0.05
+  ) +
+  
+  # Escala de
+  scale_fill_gradient(
+    name = "Pop. Amarela por Munícipio",
+    high  = "#e65100",
+    low =  "#FFF59D",
+    na.value = "grey90",
+    labels = function(x) paste0(x, "%"),
+     guide = guide_colourbar(
+      title.position = "bottom",
+      title.hjust = 0.5,
+      barwidth = unit(5, "cm"),
+      barheight = unit(0.5, "cm")
+    )
+  ) +
+  
+  # Tema 
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.margin = margin(b = 10), 
+    plot.caption = element_text(
+      size = 10, 
+      color = "grey20",
+      hjust = 0.5,
+      family = "roboto")) +
+  
+  # Labs 
+    labs(
+    caption = "Fonte: IBGE/SIDRA | anabodevan.github.io")
+
+p_amarelos
+```
